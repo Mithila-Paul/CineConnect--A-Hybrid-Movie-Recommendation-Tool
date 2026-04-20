@@ -8,6 +8,9 @@
 #include <string>
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
+#include "tf-idf.h"
+#include "mf.h"
 
 using namespace std;
 
@@ -149,7 +152,7 @@ void saveMovieVectorsToFile(
 // extract movie topics
 unordered_map<int, vector<string>> extractMovieTopics(
     const vector<pair<int, unordered_map<string, double>>> &movieVectors,
-    int topWords = 5)
+    int topWords)
 {
     unordered_map<int, vector<string>> movieTopics;
 
@@ -189,9 +192,119 @@ void saveTopicsToFile(
     }
 }
 
+
+// =============================================================================
+// generateGenreFile
+// Reads movies_synchronized.csv and builds movie_genres.txt.
+// Format per line: movieId|primaryGenre|genre1:w1,genre2:w2,...
+//
+// Genre weights are computed by position of first appearance in the tags:
+// Earlier-appearing genres get higher weight (inverse-rank scoring).
+// Primary genre = first genre keyword found in tags.
+//
+// Actors appear as last 3 tokens, director as the very last token.
+// These are NOT included in genre weights — they serve actor/director search.
+// =============================================================================
+void generateGenreFile(const string &csvFile, const string &outFile)
+{
+    static const unordered_set<string> GENRES = {
+        "action","adventure","animation","comedy","crime","documentary",
+        "drama","fantasy","history","horror","music","mystery","romance",
+        "sciencefiction","thriller","war","western","family","sport"
+    };
+
+    ifstream file(csvFile);
+    if (!file.is_open()) { cout << "Genre gen: cannot open " << csvFile << "\n"; return; }
+
+    ofstream out(outFile);
+    string line;
+    getline(file, line); // skip header
+
+    while (getline(file, line))
+    {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty()) continue;
+
+        stringstream ss(line);
+        string idStr, title, tags;
+        getline(ss, idStr,  ',');
+        getline(ss, title,  ',');
+        getline(ss, tags);
+        tags.erase(remove(tags.begin(), tags.end(), '"'), tags.end());
+
+        string tagsLower = tags;
+        transform(tagsLower.begin(), tagsLower.end(), tagsLower.begin(), ::tolower);
+
+        // Find genre keywords as exact space-separated tokens, preserve order
+        vector<string> found;
+        unordered_set<string> seen;
+        stringstream ts(tagsLower);
+        string tok;
+        while (ts >> tok)
+        {
+            tok.erase(remove_if(tok.begin(), tok.end(), ::ispunct), tok.end());
+            if (GENRES.count(tok) && !seen.count(tok))
+            {
+                found.push_back(tok);
+                seen.insert(tok);
+            }
+        }
+
+        // Default to drama if no genre found
+        if (found.empty()) found.push_back("drama");
+
+        // Inverse-rank weights: first genre gets n points, second n-1, etc.
+        int n = found.size();
+        double total = n * (n + 1) / 2.0;
+
+        string primary = found[0];
+        string weightStr;
+        // Sort by weight descending for output
+        vector<pair<double,string>> weighted;
+        for (int i = 0; i < n; i++)
+            weighted.push_back({(n - i) / total, found[i]});
+        sort(weighted.rbegin(), weighted.rend());
+
+        for (int i = 0; i < (int)weighted.size(); i++)
+        {
+            if (i > 0) weightStr += ",";
+            // format weight to 4 decimal places
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%.4f", weighted[i].first);
+            weightStr += weighted[i].second + ":" + buf;
+        }
+
+        out << idStr << "|" << primary << "|" << weightStr << "\n";
+    }
+
+    file.close();
+    out.close();
+    cout << "Genre file generated: " << outFile << "\n";
+}
+
 void initializeSystem()
 {
-    string filename = "movies_processed.csv";
+    // Skip recompute if vectors already exist — saves several seconds on every launch
+    {
+
+        
+cout << "Checking system files...\n";
+        ifstream check("movie_vectors.txt");
+        if (check.is_open())
+        {
+            check.close();
+            // Also generate genre file if missing (lightweight, always safe to regenerate)
+            ifstream gcheck("movie_genres.txt");
+            if (!gcheck.is_open())
+                generateGenreFile("movies_synchronized.csv", "movie_genres.txt");
+            // Train MF once if model file missing, otherwise loads instantly
+            initMF("ratings_processed.csv");
+            cout << "System data already initialized. Ready!\n";
+            return;
+        }
+    }
+
+    string filename = "movies_synchronized.csv";
     cout << "Initializing system data... this may take a moment.\n";
 
     // read movie id + tags
@@ -220,6 +333,9 @@ void initializeSystem()
     saveMovieVectorsToFile(movieVectors, "movie_vectors.txt");
     auto topics = extractMovieTopics(movieVectors);
     saveTopicsToFile(topics);
+    generateGenreFile("movies_synchronized.csv", "movie_genres.txt");
+    // Train MF model on first run — saved to mf_model.bin for instant reuse
+    initMF("ratings_processed.csv");
 
     cout << "System initialized! Data files created successfully.\n";
 }
