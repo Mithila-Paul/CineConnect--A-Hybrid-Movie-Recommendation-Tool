@@ -2,15 +2,20 @@
 #include "cbf.h"
 #include "tf-idf.h"
 #include "cf.h"
+#include "genre.h"
+#include "mf.h"
+#include "gp.h"
 #include <string>
 #include <iostream>
 #include <fstream>
 #include <sstream>
 #include <cctype>
 #include <limits>
-#include <algorithm> // Added for transform
+#include <algorithm>
 
 using namespace std;
+
+
 
 // this is to generate unique user IDs
 // Pre-existing MovieLens users occupy IDs 1-610 in ratings_processed.csv
@@ -251,19 +256,28 @@ void removeFromGlobalRatings(int userId, int movieId)
 
     string line;
     getline(fin, line);
-    tmp << line << "\n"; // write header
+    // Write header without \r so the output file is clean
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    tmp << line << "\n";
 
     while (getline(fin, line))
     {
+        if (!line.empty() && line.back() == '\r') line.pop_back(); // strip Windows \r
+        if (line.empty()) continue;
+
         stringstream ss(line);
         string midStr, uidStr, rStr;
         getline(ss, midStr, ',');
         getline(ss, uidStr, ',');
-        getline(ss, rStr, ',');
-        // keep all lines EXCEPT the one matching this user+movie
-        if (stoi(midStr) == movieId && stoi(uidStr) == userId)
-            continue;
-        tmp << line << "\n";
+        getline(ss, rStr,   ',');
+
+        bool isTarget = false;
+        try {
+            isTarget = (stoi(midStr) == movieId && stoi(uidStr) == userId);
+        } catch (...) {}
+
+        if (!isTarget)
+            tmp << line << "\n"; // keep all lines EXCEPT the matching one
     }
     fin.close();
     tmp.close();
@@ -409,18 +423,96 @@ void showMyRatings(int userId)
 
 void recommendMoviesForUser(int userId)
 {
-    auto movieVectors = loadMovieVectors("movie_vectors.txt");
-    auto titles       = loadMovieTitles("movies_synchronized.csv");
-    auto movieTopics  = loadMovieTopics("movie_topics.txt");
+    // ── Load core data ────────────────────────────────────────────────────────
+    auto movieVectors   = loadMovieVectors("movie_vectors.txt");
+    auto titles         = loadMovieTitles("movies_synchronized.csv");
+    auto movieTopicsMap = loadMovieTopics("movie_topics.txt");
+    GenreMap gmap       = loadGenreMap("movie_genres.txt");
 
     string ratingsFile = "user" + to_string(userId) + "_ratings.txt";
+    auto   rated       = getRatedMovieIds(ratingsFile, userId);
 
-    cin.ignore();
-    cout << "What kind of movie are you craving right now?\n";
+    // ── Search mode selection ─────────────────────────────────────────────────
+    cout << "\nHow do you want to search?\n";
+    cout << "  1. By genre\n";
+    cout << "  2. By actor\n";
+    cout << "  3. By director\n";
+    cout << "  4. By plot / keywords\n";
+    cout << "  5. General craving (free text)\n";
+    cout << "Enter choice: ";
+
+    int searchMode;
+    cin >> searchMode;
+    if (cin.fail()) { cin.clear(); cin.ignore(10000, '\n'); searchMode = 5; }
+    cin.ignore(10000, '\n');
+
+    // ── Candidate set: start with all movies, then filter by search ───────────
+    vector<int> candidateIds;
+    string searchGenre;
+
+    if (searchMode == 1)
+    {
+        cout << "\nAvailable genres:\n";
+        for (int i = 0; i < (int)GENRE_DISPLAY.size(); i++)
+            cout << "  " << (i+1) << ". " << GENRE_DISPLAY[i].second << "\n";
+        cout << "Enter genre name or number: ";
+        string genreInput;
+        getline(cin, genreInput);
+
+        try {
+            int idx = stoi(genreInput);
+            if (idx >= 1 && idx <= (int)GENRE_DISPLAY.size())
+                searchGenre = GENRE_DISPLAY[idx-1].first;
+        } catch (...) {
+            searchGenre = genreInput;
+            transform(searchGenre.begin(), searchGenre.end(), searchGenre.begin(), ::tolower);
+            searchGenre.erase(remove(searchGenre.begin(), searchGenre.end(), ' '), searchGenre.end());
+        }
+
+        candidateIds = getMoviesByPrimaryGenre(searchGenre, gmap);
+        if (candidateIds.size() < 20)
+        {
+            auto expanded = getMoviesByGenreThreshold(searchGenre, gmap, 0.15);
+            unordered_set<int> already(candidateIds.begin(), candidateIds.end());
+            for (int id : expanded)
+                if (!already.count(id)) candidateIds.push_back(id);
+        }
+        cout << "Found " << candidateIds.size() << " movies in genre.\n";
+    }
+    else if (searchMode == 2)
+    {
+        cout << "Enter actor name: ";
+        string actorInput;
+        getline(cin, actorInput);
+        candidateIds = getMoviesByActor(actorInput, "movies_synchronized.csv");
+        cout << "Found " << candidateIds.size() << " movies with that actor.\n";
+        if (candidateIds.empty())
+            cout << "  Tip: use full name e.g. \"Leonardo DiCaprio\"\n";
+    }
+    else if (searchMode == 3)
+    {
+        cout << "Enter director name: ";
+        string dirInput;
+        getline(cin, dirInput);
+        candidateIds = getMoviesByDirector(dirInput, "movies_synchronized.csv");
+        cout << "Found " << candidateIds.size() << " movies by that director.\n";
+        if (candidateIds.empty())
+            cout << "  Tip: use full name e.g. \"Christopher Nolan\"\n";
+    }
+    else if (searchMode == 4)
+    {
+        cout << "Describe what you are looking for (plot/keywords): ";
+        string plotInput;
+        getline(cin, plotInput);
+        candidateIds = getMoviesByPlot(plotInput, "movies_synchronized.csv");
+        cout << "Found " << candidateIds.size() << " matching movies.\n";
+    }
+
+    // ── Build query vector from user's text description ───────────────────────
+    cout << "Any other craving or mood? (press Enter to skip): ";
     string query;
     getline(cin, query);
 
-    // ── Build query vector (TF-IDF over movie vocabulary) ────────────────────
     vector<vector<string>> docs;
     for (auto &mv : movieVectors)
     {
@@ -428,78 +520,135 @@ void recommendMoviesForUser(int userId)
         for (auto &it : mv.second) words.push_back(it.first);
         docs.push_back(words);
     }
-    auto df           = computeDF(docs);
+    auto df            = computeDF(docs);
     Vector queryVector = buildQueryVector(query, df, movieVectors.size());
-    auto queryTopics  = processQuery(query);
+    auto queryTopics   = processQuery(query);
 
     // ── User profile ──────────────────────────────────────────────────────────
     Vector userVector = buildUserVector(ratingsFile, movieVectors, userId);
-    auto   rated      = getRatedMovieIds(ratingsFile, userId);
 
-    // ── Cold start — no ratings yet ───────────────────────────────────────────
+    // ── Cold start ────────────────────────────────────────────────────────────
     if (rated.empty())
     {
         cout << "\nHello new user! Showing content-based recommendations.\n";
-        auto recs = coldStartRecommend(movieVectors, queryVector, 10);
+        vector<pair<int,Vector>> candidates;
+        if (!candidateIds.empty())
+        {
+            unordered_set<int> cidSet(candidateIds.begin(), candidateIds.end());
+            for (auto &mv : movieVectors)
+                if (cidSet.count(mv.first)) candidates.push_back(mv);
+        }
+        else candidates = movieVectors;
+
+        auto recs = coldStartRecommend(candidates, queryVector, 10);
         cout << "\nRecommended Movies:\n";
         for (int id : recs)
             cout << "  " << titles[id] << "\n";
         return;
     }
 
-    // ── Load global ratings + get CF scores ───────────────────────────────────
+    // ── Load CF + MF + GP scores ──────────────────────────────────────────────
     cout << "Computing personalized recommendations...\n";
+
     RatingsMap allRatings = loadAllRatings("ratings_processed.csv");
 
-    // getCFScores precomputes all neighbor similarities ONCE, then scores
-    // every unrated movie. Returns movieId -> normalized score in [0,1].
-    unordered_map<int, double> cfScores = getCFScores(userId, allRatings, rated);
+    unordered_map<int, double> cfScores  = getCFScores(userId, allRatings, rated);
 
-    // ── Hybrid scoring ────────────────────────────────────────────────────────
-    // Weights: CBF user pref | CBF query | topic | CF
-    // CF weight is lower when user has few ratings (less reliable signal)
+    MFModel mfModel = loadMFModel("mf_model.bin");
+    unordered_map<int, double> mfScores  = getMFScores(userId, mfModel, rated);
+
+    // GP: Graph Propagation over the user-movie bipartite graph.
+    // Reuses allRatings loaded above — no extra I/O cost.
+    // Returns per-movie propagated score, already normalised to [0,1].
+    //
+    // We cast RatingsMap → GPRatingsMap; both are the same underlying type
+    // (unordered_map<int, unordered_map<int, double>>) so this is zero-cost.
+    unordered_map<int, double> gpScores = computeGP(
+        reinterpret_cast<const GPRatingsMap &>(allRatings),
+        userId,
+        rated);
+
+    // ── Hybrid scoring weights (adaptive by rating count) ─────────────────────
     int    ratingCount = (int)rated.size();
-    double wCF  = (ratingCount >= 20) ? 0.30 : (ratingCount >= 5 ? 0.15 : 0.05);
-    double wCBF = 0.40;
-    double wQ   = 0.20;
-    double wT   = 1.0 - wCBF - wQ - wCF; // topic weight fills remainder
 
-    auto movieTopicsMap = loadMovieTopics("movie_topics.txt");
+    double wCBF, wQ, wT, wCF, wMF, wGP;
+
+    if (ratingCount >= 20)
+    {
+        wCBF = 0.28; wQ = 0.12; wT = 0.06;
+        wCF  = 0.18; wMF = 0.18; wGP = 0.18;
+    }
+    else if (ratingCount >= 5)
+    {
+        wCBF = 0.33; wQ = 0.15; wT = 0.08;
+        wCF  = 0.10; wMF = 0.10; wGP = 0.12;
+    }
+    else
+    {
+        wCBF = 0.33; wQ = 0.15; wT = 0.08;
+        wCF  = 0.03; wMF = 0.03; wGP = 0.06;
+    }
+
+    double wG = searchGenre.empty() ? 0.0 : 0.08;
+
+    double wSum = wCBF + wQ + wT + wCF + wMF + wGP + wG;
+    wCBF /= wSum; wQ   /= wSum; wT   /= wSum;
+    wCF  /= wSum; wMF  /= wSum; wGP  /= wSum; wG /= wSum;
+
+    // ── Build candidate pool and score every movie ────────────────────────────
+    unordered_set<int> cidSet(candidateIds.begin(), candidateIds.end());
+    bool useFilter = !candidateIds.empty();
 
     vector<pair<double, int>> scores;
 
     for (auto &mv : movieVectors)
     {
         int movieId = mv.first;
+
         if (rated.count(movieId)) continue;
+        if (useFilter && !cidSet.count(movieId)) continue;
 
         double cbfScore   = cosineSimilarity(userVector, mv.second);
-        double queryScore = cosineSimilarity(queryVector, mv.second);
+        double queryScore = query.empty() ? 0.0
+                          : cosineSimilarity(queryVector, mv.second);
 
         double topicScore = 0.0;
         if (movieTopicsMap.count(movieId))
             topicScore = topicSimilarity(queryTopics, movieTopicsMap.at(movieId));
 
-        double cfScore = 0.0;
-        if (cfScores.count(movieId))
-            cfScore = cfScores.at(movieId);
+        double cfScore  = cfScores.count(movieId) ? cfScores.at(movieId) : 0.0;
+        double mfScore  = mfScores.count(movieId) ? mfScores.at(movieId) : 0.0;
+
+        // GP: propagated graph score, normalised [0,1]
+        double gpScore = gpScores.count(movieId) ? gpScores.at(movieId) : 0.0;
+
+        double genreScore = searchGenre.empty() ? 0.0
+                          : getGenreWeight(movieId, searchGenre, gmap);
 
         double finalScore = wCBF * cbfScore
                           + wQ   * queryScore
                           + wT   * topicScore
-                          + wCF  * cfScore;
+                          + wCF  * cfScore
+                          + wMF  * mfScore
+                          + wGP  * gpScore
+                          + wG   * genreScore;
 
         scores.push_back({finalScore, movieId});
     }
 
     sort(scores.rbegin(), scores.rend());
 
+    // ── Output ────────────────────────────────────────────────────────────────
     cout << "\nRecommended Movies:\n";
     int shown = 0;
     for (auto &s : scores)
     {
         if (shown >= 10) break;
-        cout << "  " << titles[s.second] << "\n";
+        string genreTag;
+        auto git = gmap.find(s.second);
+        if (git != gmap.end())
+            genreTag = " [" + git->second.primaryGenre + "]";
+        cout << "  " << titles[s.second] << genreTag << "\n";
         shown++;
     }
 }
