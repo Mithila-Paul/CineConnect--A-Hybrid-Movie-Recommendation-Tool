@@ -12,10 +12,342 @@
 #include <cctype>
 #include <limits>
 #include <algorithm>
+#include <vector>
+#include <unordered_map>
+#include <unordered_set>
+#include <cmath>
+#include <iomanip>
 
 using namespace std;
 
+struct MovieStats
+{
+    double averageRating = 0.0;
+    int ratingCount = 0;
+};
 
+// Reads ratings_processed.csv and computes per-movie average + count
+unordered_map<int, MovieStats> computeMovieStats(const string &filename)
+{
+    unordered_map<int, double> sumRatings;
+    unordered_map<int, int> countRatings;
+    unordered_map<int, MovieStats> stats;
+
+    ifstream file(filename);
+    if (!file.is_open())
+    {
+        cout << "Could not open " << filename << " for movie statistics.\n";
+        return stats;
+    }
+
+    string line;
+    getline(file, line); // skip header
+
+    while (getline(file, line))
+    {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty()) continue;
+
+        stringstream ss(line);
+        string movieIdStr, userIdStr, ratingStr;
+        getline(ss, movieIdStr, ',');
+        getline(ss, userIdStr, ',');
+        getline(ss, ratingStr, ',');
+
+        if (movieIdStr.empty() || ratingStr.empty()) continue;
+
+        try
+        {
+            int movieId = stoi(movieIdStr);
+            double rating = stod(ratingStr);
+
+            sumRatings[movieId] += rating;
+            countRatings[movieId]++;
+        }
+        catch (...) {}
+    }
+
+    file.close();
+
+    for (auto &kv : countRatings)
+    {
+        int movieId = kv.first;
+        int cnt = kv.second;
+
+        MovieStats ms;
+        ms.ratingCount = cnt;
+        ms.averageRating = (cnt > 0) ? (sumRatings[movieId] / cnt) : 0.0;
+        stats[movieId] = ms;
+    }
+
+    return stats;
+}
+
+string getMovieTitleById(int movieId);
+
+// Returns the top N seed movies for a genre using popularity-weighted score
+vector<int> getTopSeedMoviesByGenre(const string &genre, int count)
+{
+    GenreMap gmap = loadGenreMap("movie_genres.txt");
+    auto titles = loadMovieTitles("movies_synchronized.csv");
+    auto stats = computeMovieStats("ratings_processed.csv");
+
+    // strict primary-genre candidates first
+    vector<int> candidates = getMoviesByPrimaryGenre(genre, gmap);
+
+    // if too few, expand using threshold
+    if ((int)candidates.size() < count)
+    {
+        auto expanded = getMoviesByGenreThreshold(genre, gmap, 0.15);
+        unordered_set<int> seen(candidates.begin(), candidates.end());
+        for (int id : expanded)
+        {
+            if (!seen.count(id))
+            {
+                candidates.push_back(id);
+                seen.insert(id);
+            }
+        }
+    }
+
+    vector<pair<double, int>> ranked;
+
+    for (int movieId : candidates)
+    {
+        if (!titles.count(movieId)) continue;
+
+        double avg = 0.0;
+        int cnt = 0;
+
+        if (stats.count(movieId))
+        {
+            avg = stats[movieId].averageRating;
+            cnt = stats[movieId].ratingCount;
+        }
+
+        // popularity-weighted score
+        double score = avg * log(1.0 + cnt);
+
+        // if a movie has no ratings, still keep it with very low score
+        ranked.push_back({score, movieId});
+    }
+
+    sort(ranked.begin(), ranked.end(),
+         [](const pair<double, int> &a, const pair<double, int> &b)
+         {
+             if (fabs(a.first - b.first) > 1e-9)
+                 return a.first > b.first;
+             return a.second < b.second;
+         });
+
+    vector<int> result;
+    unordered_set<int> used;
+
+    for (auto &p : ranked)
+    {
+        if ((int)result.size() >= count) break;
+        if (used.count(p.second)) continue;
+        result.push_back(p.second);
+        used.insert(p.second);
+    }
+
+    return result;
+}
+
+vector<string> chooseFavoriteGenres(int maxGenres)
+{
+    vector<string> chosen;
+    unordered_set<string> used;
+
+    cout << "\nChoose up to " << maxGenres << " favorite genres.\n";
+    cout << "Enter 0 when finished.\n\n";
+
+    for (int i = 0; i < (int)GENRE_DISPLAY.size(); i++)
+        cout << setw(2) << (i + 1) << ". " << GENRE_DISPLAY[i].second << "\n";
+
+    while ((int)chosen.size() < maxGenres)
+    {
+        cout << "\nPick genre #" << (chosen.size() + 1) << " by number (0 to stop): ";
+        int choice;
+        cin >> choice;
+
+        if (cin.fail())
+        {
+            cin.clear();
+            cin.ignore(numeric_limits<streamsize>::max(), '\n');
+            cout << "Invalid input. Try again.\n";
+            continue;
+        }
+
+        if (choice == 0) break;
+
+        if (choice < 1 || choice > (int)GENRE_DISPLAY.size())
+        {
+            cout << "Invalid genre number.\n";
+            continue;
+        }
+
+        string genre = GENRE_DISPLAY[choice - 1].first;
+        if (used.count(genre))
+        {
+            cout << "You already selected that genre.\n";
+            continue;
+        }
+
+        chosen.push_back(genre);
+        used.insert(genre);
+        cout << "Added: " << GENRE_DISPLAY[choice - 1].second << "\n";
+    }
+
+    cin.ignore(numeric_limits<streamsize>::max(), '\n');
+    return chosen;
+}
+
+void saveSeedRating(int userId, int movieId, double rating)
+{
+    string movieTitle = getMovieTitleById(movieId);
+
+    ofstream fout("user" + to_string(userId) + "_ratings.txt", ios::app);
+    fout << movieId << " | " << movieTitle << " | " << rating << "\n";
+    fout.close();
+
+    appendToGlobalRatings(userId, movieId, rating);
+}
+
+string getGenreDisplayName(const string &genreKey)
+{
+    for (const auto &p : GENRE_DISPLAY)
+    {
+        if (p.first == genreKey)
+            return p.second;
+    }
+    return genreKey;
+}
+
+void runColdStartOnboarding(int userId)
+{
+    cout << "\n==============================\n";
+    cout << "Cold-Start Onboarding\n";
+    cout << "==============================\n";
+    cout << "Help us know your taste better.\n";
+    cout << "Choose favorite genres and rate a few seed movies.\n";
+
+    vector<string> favoriteGenres = chooseFavoriteGenres(3);
+
+    if (favoriteGenres.empty())
+    {
+        cout << "No genres selected. Skipping onboarding.\n";
+        return;
+    }
+
+    auto titles = loadMovieTitles("movies_synchronized.csv");
+    unordered_set<int> alreadyShown;
+
+    for (const string &genre : favoriteGenres)
+    {
+        vector<int> seeds = getTopSeedMoviesByGenre(genre, 3);
+
+        if (seeds.empty())
+        {
+            cout << "\nNo seed movies found for genre: " << genre << "\n";
+            continue;
+        }
+
+        cout << "\n----------------------------------\n";
+        cout << "Genre: " << getGenreDisplayName(genre) << "\n";
+        cout << "Here are 3 seed movies for this genre:\n";
+
+        vector<int> uniqueSeeds;
+        for (int movieId : seeds)
+        {
+            if (alreadyShown.count(movieId)) continue;
+            if (!titles.count(movieId)) continue;
+
+            uniqueSeeds.push_back(movieId);
+            if ((int)uniqueSeeds.size() == 3) break;
+        }
+
+        if (uniqueSeeds.empty())
+        {
+            cout << "All seed movies for this genre were already shown. Skipping.\n";
+            continue;
+        }
+
+        for (int i = 0; i < (int)uniqueSeeds.size(); i++)
+        {
+            int movieId = uniqueSeeds[i];
+            cout << "  " << (i + 1) << ". " << titles[movieId] << "\n";
+        }
+
+        cout << "\nEnter:\n";
+        cout << "  r = rate these movies\n";
+        cout << "  s = skip this genre\n";
+        cout << "  q = quit onboarding\n";
+        cout << "Your choice: ";
+
+        char genreChoice;
+        cin >> genreChoice;
+        cin.ignore(numeric_limits<streamsize>::max(), '\n');
+
+        if (genreChoice == 'q' || genreChoice == 'Q')
+        {
+            cout << "Exiting onboarding early.\n";
+            break;
+        }
+
+        if (genreChoice == 's' || genreChoice == 'S')
+        {
+            cout << "Skipped genre: " << genre << "\n";
+            continue;
+        }
+
+        if (!(genreChoice == 'r' || genreChoice == 'R'))
+        {
+            cout << "Invalid choice. Skipping this genre.\n";
+            continue;
+        }
+
+        for (int movieId : uniqueSeeds)
+        {
+            alreadyShown.insert(movieId);
+
+            cout << "\n" << titles[movieId] << "\n";
+            cout << "Rate from 1 to 5\n";
+            cout << "Enter 0 to skip this movie: ";
+
+            double rating;
+            cin >> rating;
+
+            while (cin.fail() || rating < 0 || rating > 5)
+            {
+                cin.clear();
+                cin.ignore(numeric_limits<streamsize>::max(), '\n');
+                cout << "Enter a valid rating between 0 and 5: ";
+                cin >> rating;
+            }
+
+            cin.ignore(numeric_limits<streamsize>::max(), '\n');
+
+            if (rating == 0)
+            {
+                cout << "Skipped.\n";
+                continue;
+            }
+
+            if (!hasRatedMovie(userId, movieId))
+            {
+                saveSeedRating(userId, movieId, rating);
+                cout << "Saved.\n";
+            }
+            else
+            {
+                cout << "Already rated, skipped.\n";
+            }
+        }
+    }
+
+    cout << "\nOnboarding complete. Your profile has been seeded.\n";
+}
 
 // this is to generate unique user IDs
 // Pre-existing MovieLens users occupy IDs 1-610 in ratings_processed.csv
@@ -61,11 +393,14 @@ int generateUserId()
 void registerUser()
 {
     int userId = generateUserId();
+
     ofstream fout("user" + to_string(userId) + "_ratings.txt");
     fout.close();
 
     cout << "Registration successful!\n";
     cout << "Your User ID is: " << userId << endl;
+
+    runColdStartOnboarding(userId);
 }
 
 // Login system
