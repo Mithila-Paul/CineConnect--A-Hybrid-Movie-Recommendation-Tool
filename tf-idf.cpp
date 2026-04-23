@@ -10,11 +10,11 @@
 #include <cctype>
 #include <cstdio>
 #include "tf-idf.h"
-#include "mf.h"
+#include "csv_parser.h"
 
 using namespace std;
 
-// for ignoring common stop words
+// Common words to ignore
 unordered_set<string> stopWords = {
     "the", "is", "a", "an", "and", "or", "of", "to", "in", "on", "for", "with",
     "by", "at", "from", "as", "that", "this", "it", "was", "are", "be",
@@ -28,20 +28,21 @@ vector<string> tokenize(const string &text)
 
     while (ss >> word)
     {
+        transform(word.begin(), word.end(), word.begin(), ::tolower);
 
-        transform(word.begin(), word.end(), word.begin(), ::tolower); // transforming to lower case
-
-        word.erase(remove_if(word.begin(), word.end(), ::ispunct), word.end()); // it is for removing punctuation
+        word.erase(
+            remove_if(word.begin(), word.end(), ::ispunct),
+            word.end());
 
         if (!word.empty() && stopWords.find(word) == stopWords.end())
         {
-            words.push_back(word); // only add if it not a stop word
+            words.push_back(word);
         }
     }
+
     return words;
 }
 
-// csv reader for movie id and tags
 vector<pair<int, string>> readMoviesFromCSV(const string &filename)
 {
     ifstream file(filename);
@@ -54,195 +55,232 @@ vector<pair<int, string>> readMoviesFromCSV(const string &filename)
     }
 
     string line;
-    getline(file, line); // I will skip header
+    getline(file, line);
 
     while (getline(file, line))
     {
-        stringstream ss(line);
-        string idStr, title, tags;
+        stripCR(line);
 
-        getline(ss, idStr, ','); // movie id
-        getline(ss, title, ','); // title which is ignored
-        getline(ss, tags);       // tags
+        if (line.empty())
+        {
+            continue;
+        }
 
-        int movieID = stoi(idStr);
+        istringstream ss(line);
+        string idStr = parseCsvField(ss);
+        string title = parseCsvField(ss);
+        string tags;
 
-        // quotation removal
-        if (!tags.empty() && tags.front() == '"')
+        getline(ss, tags);
+
+        if (!tags.empty() && tags[0] == '"')
+        {
             tags.erase(0, 1);
-        if (!tags.empty() && tags.back() == '"')
-            tags.pop_back();
+        }
 
-        movies.push_back({movieID, tags});
+        if (!tags.empty() && tags[tags.size() - 1] == '"')
+        {
+            tags.erase(tags.size() - 1);
+        }
+
+        try
+        {
+            movies.push_back(make_pair(stoi(idStr), tags));
+        }
+        catch (...)
+        {
+        }
     }
 
     file.close();
     return movies;
 }
 
-// tf
 unordered_map<string, double> computeTF(const vector<string> &words)
 {
     unordered_map<string, double> tf;
 
-    for (const string &w : words)
-        tf[w]++;
+    for (int i = 0; i < (int)words.size(); i++)
+    {
+        tf[words[i]]++;
+    }
 
-    double totalWords = words.size();
-    for (auto &it : tf)
-        it.second /= totalWords;
+    double totalWords = (double)words.size();
+
+    unordered_map<string, double>::iterator it;
+    for (it = tf.begin(); it != tf.end(); ++it)
+    {
+        it->second /= totalWords;
+    }
 
     return tf;
 }
 
-// df
 unordered_map<string, int> computeDF(const vector<vector<string>> &docs)
 {
     unordered_map<string, int> df;
 
-    for (const auto &doc : docs)
+    for (int i = 0; i < (int)docs.size(); i++)
     {
-        unordered_set<string> uniqueWords(doc.begin(), doc.end());
-        for (const string &w : uniqueWords)
-            df[w]++;
+        unordered_set<string> uniqueWords(docs[i].begin(), docs[i].end());
+
+        unordered_set<string>::iterator it;
+        for (it = uniqueWords.begin(); it != uniqueWords.end(); ++it)
+        {
+            df[*it]++;
+        }
     }
+
     return df;
 }
 
-// tf-idf
 unordered_map<string, double> computeTFIDF(
     const unordered_map<string, double> &tf,
     const unordered_map<string, int> &df,
     int totalDocs)
 {
-
     unordered_map<string, double> tfidf;
 
-    for (auto &it : tf)
+    unordered_map<string, double>::const_iterator it;
+    for (it = tf.begin(); it != tf.end(); ++it)
     {
-        const string &word = it.first;
-        double idf = log((double)totalDocs / df.at(word));
-        tfidf[word] = it.second * idf;
+        const string &word = it->first;
+
+        unordered_map<string, int>::const_iterator dfIt = df.find(word);
+        if (dfIt == df.end() || dfIt->second == 0)
+        {
+            continue;
+        }
+
+        double idf = log((double)totalDocs / dfIt->second);
+        tfidf[word] = it->second * idf;
     }
 
     return tfidf;
 }
 
-// save movie vectors to file
 void saveMovieVectorsToFile(
     const vector<pair<int, unordered_map<string, double>>> &movieVectors,
     const string &filename)
 {
     ofstream out(filename);
 
-    for (auto &mv : movieVectors)
+    for (int i = 0; i < (int)movieVectors.size(); i++)
     {
-        out << mv.first; // movie ID
+        out << movieVectors[i].first;
 
-        for (auto &it : mv.second)
+        unordered_map<string, double>::const_iterator it;
+        for (it = movieVectors[i].second.begin(); it != movieVectors[i].second.end(); ++it)
         {
-            out << " " << it.first << ":" << it.second;
+            out << " " << it->first << ":" << it->second;
         }
+
         out << "\n";
     }
 
     out.close();
 }
 
-// extract movie topics
 unordered_map<int, vector<string>> extractMovieTopics(
     const vector<pair<int, unordered_map<string, double>>> &movieVectors,
     int topWords)
 {
     unordered_map<int, vector<string>> movieTopics;
 
-    for (auto &mv : movieVectors)
+    for (int i = 0; i < (int)movieVectors.size(); i++)
     {
         vector<pair<double, string>> words;
 
-        for (auto &it : mv.second)
-            words.push_back({it.second, it.first});
+        unordered_map<string, double>::const_iterator it;
+        for (it = movieVectors[i].second.begin(); it != movieVectors[i].second.end(); ++it)
+        {
+            words.push_back(make_pair(it->second, it->first));
+        }
 
         sort(words.rbegin(), words.rend());
 
         vector<string> topics;
-        for (int i = 0; i < topWords && i < words.size(); i++)
-            topics.push_back(words[i].second);
+        for (int j = 0; j < topWords && j < (int)words.size(); j++)
+        {
+            topics.push_back(words[j].second);
+        }
 
-        movieTopics[mv.first] = topics;
+        movieTopics[movieVectors[i].first] = topics;
     }
 
     return movieTopics;
 }
 
-// save topics to file
 void saveTopicsToFile(
     const unordered_map<int, vector<string>> &topics)
 {
     ofstream out("movie_topics.txt");
 
-    for (auto &mv : topics)
+    unordered_map<int, vector<string>>::const_iterator it;
+    for (it = topics.begin(); it != topics.end(); ++it)
     {
-        out << mv.first;
+        out << it->first;
 
-        for (auto &word : mv.second)
-            out << " " << word;
+        for (int i = 0; i < (int)it->second.size(); i++)
+        {
+            out << " " << it->second[i];
+        }
 
         out << endl;
     }
+
+    out.close();
 }
 
-
-// =============================================================================
-// generateGenreFile
-// Reads movies_synchronized.csv and builds movie_genres.txt.
-// Format per line: movieId|primaryGenre|genre1:w1,genre2:w2,...
-//
-// Genre weights are computed by position of first appearance in the tags:
-// Earlier-appearing genres get higher weight (inverse-rank scoring).
-// Primary genre = first genre keyword found in tags.
-//
-// Actors appear as last 3 tokens, director as the very last token.
-// These are NOT included in genre weights — they serve actor/director search.
-// =============================================================================
 void generateGenreFile(const string &csvFile, const string &outFile)
 {
     static const unordered_set<string> GENRES = {
-        "action","adventure","animation","comedy","crime","documentary",
-        "drama","fantasy","history","horror","music","mystery","romance",
-        "sciencefiction","thriller","war","western","family","sport"
-    };
+        "action", "adventure", "animation", "comedy", "crime", "documentary",
+        "drama", "fantasy", "history", "horror", "music", "mystery", "romance",
+        "sciencefiction", "thriller", "war", "western", "family", "sport"};
 
     ifstream file(csvFile);
-    if (!file.is_open()) { cout << "Genre gen: cannot open " << csvFile << "\n"; return; }
+    if (!file.is_open())
+    {
+        cout << "Genre gen: cannot open " << csvFile << "\n";
+        return;
+    }
 
     ofstream out(outFile);
+
     string line;
     getline(file, line); // skip header
 
     while (getline(file, line))
     {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        if (line.empty()) continue;
+        stripCR(line);
 
-        stringstream ss(line);
-        string idStr, title, tags;
-        getline(ss, idStr,  ',');
-        getline(ss, title,  ',');
+        if (line.empty())
+        {
+            continue;
+        }
+
+        istringstream ss(line);
+        string idStr = parseCsvField(ss);
+        string title = parseCsvField(ss);
+        string tags;
+
         getline(ss, tags);
         tags.erase(remove(tags.begin(), tags.end(), '"'), tags.end());
 
         string tagsLower = tags;
         transform(tagsLower.begin(), tagsLower.end(), tagsLower.begin(), ::tolower);
 
-        // Find genre keywords as exact space-separated tokens, preserve order
         vector<string> found;
         unordered_set<string> seen;
+
         stringstream ts(tagsLower);
         string tok;
+
         while (ts >> tok)
         {
             tok.erase(remove_if(tok.begin(), tok.end(), ::ispunct), tok.end());
+
             if (GENRES.count(tok) && !seen.count(tok))
             {
                 found.push_back(tok);
@@ -250,25 +288,32 @@ void generateGenreFile(const string &csvFile, const string &outFile)
             }
         }
 
-        // Default to drama if no genre found
-        if (found.empty()) found.push_back("drama");
+        if (found.empty())
+        {
+            found.push_back("drama");
+        }
 
-        // Inverse-rank weights: first genre gets n points, second n-1, etc.
-        int n = found.size();
+        int n = (int)found.size();
         double total = n * (n + 1) / 2.0;
 
         string primary = found[0];
         string weightStr;
-        // Sort by weight descending for output
-        vector<pair<double,string>> weighted;
+
+        vector<pair<double, string>> weighted;
         for (int i = 0; i < n; i++)
-            weighted.push_back({(n - i) / total, found[i]});
+        {
+            weighted.push_back(make_pair((n - i) / total, found[i]));
+        }
+
         sort(weighted.rbegin(), weighted.rend());
 
         for (int i = 0; i < (int)weighted.size(); i++)
         {
-            if (i > 0) weightStr += ",";
-            // format weight to 4 decimal places
+            if (i > 0)
+            {
+                weightStr += ",";
+            }
+
             char buf[32];
             snprintf(buf, sizeof(buf), "%.4f", weighted[i].first);
             weightStr += weighted[i].second + ":" + buf;
@@ -279,63 +324,40 @@ void generateGenreFile(const string &csvFile, const string &outFile)
 
     file.close();
     out.close();
+
     cout << "Genre file generated: " << outFile << "\n";
 }
 
-void initializeSystem()
+static unordered_map<string, int> g_df;
+static int g_totalDocs = 0;
+
+const unordered_map<string, int> &getGlobalDF()
 {
-    // Skip recompute if vectors already exist — saves several seconds on every launch
-    {
+    return g_df;
+}
 
-        
-cout << "Checking system files...\n";
-        ifstream check("movie_vectors.txt");
-        if (check.is_open())
-        {
-            check.close();
-            // Also generate genre file if missing (lightweight, always safe to regenerate)
-            ifstream gcheck("movie_genres.txt");
-            if (!gcheck.is_open())
-                generateGenreFile("movies_synchronized.csv", "movie_genres.txt");
-            // Train MF once if model file missing, otherwise loads instantly
-            initMF("ratings_processed.csv");
-            cout << "System data already initialized. Ready!\n";
-            return;
-        }
+int getGlobalTotalDocs()
+{
+    return g_totalDocs;
+}
+
+void initializeTFIDFCache()
+{
+    if (!g_df.empty() && g_totalDocs > 0)
+    {
+        return;
     }
 
-    string filename = "movies_synchronized.csv";
-    cout << "Initializing system data... this may take a moment.\n";
+    vector<pair<int, string>> movies = readMoviesFromCSV("movies_synchronized.csv");
 
-    // read movie id + tags
-    vector<pair<int, string>> movies = readMoviesFromCSV(filename);
-    int N = movies.size();
-
-    // tokenization
     vector<vector<string>> tokenizedDocs;
-    for (auto &m : movies)
-        tokenizedDocs.push_back(tokenize(m.second));
+    tokenizedDocs.reserve(movies.size());
 
-    // df
-    unordered_map<string, int> df = computeDF(tokenizedDocs);
-
-    // tf-idf with real movie id
-    vector<pair<int, unordered_map<string, double>>> movieVectors;
-
-    for (int i = 0; i < N; i++)
+    for (int i = 0; i < (int)movies.size(); i++)
     {
-        auto tf = computeTF(tokenizedDocs[i]);
-        auto tfidf = computeTFIDF(tf, df, N);
-        movieVectors.push_back({movies[i].first, tfidf});
+        tokenizedDocs.push_back(tokenize(movies[i].second));
     }
 
-    // save
-    saveMovieVectorsToFile(movieVectors, "movie_vectors.txt");
-    auto topics = extractMovieTopics(movieVectors);
-    saveTopicsToFile(topics);
-    generateGenreFile("movies_synchronized.csv", "movie_genres.txt");
-    // Train MF model on first run — saved to mf_model.bin for instant reuse
-    initMF("ratings_processed.csv");
-
-    cout << "System initialized! Data files created successfully.\n";
+    g_df = computeDF(tokenizedDocs);
+    g_totalDocs = (int)movies.size();
 }
