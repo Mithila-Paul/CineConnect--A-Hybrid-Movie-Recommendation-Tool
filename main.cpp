@@ -1,26 +1,61 @@
 #include <iostream>
+#include <limits>
 #include "User.h"
+#include "cbf.h"
+#include "trends.h"
+#include "system_init.h"
 
 using namespace std;
 
-int main() {
+int main()
+{
     int choice;
 
-    while (true) {
-        cout << "\nWelcome To CineConnect!\n";
-        cout << "What is better than watching movies? DUH! Quickly Tell me what you want to do?\n";
+    initializeSystem();
+
+    cout << "Computing current trends...\n";
+    TrendsData globalTrends = computeTrends();
+
+    while (true)
+    {
+        cout << "\n========================================\n";
+        cout << "   Welcome to CineConnect!\n";
+        cout << "   Your hybrid movie recommender\n";
+        cout << "========================================\n";
         cout << "1. Register\n";
         cout << "2. Login\n";
         cout << "3. Exit\n";
         cout << "Enter choice: ";
+
         cin >> choice;
 
-        if (choice == 1) registerUser();
-        else if (choice == 2) loginUser();
+        if (cin.fail())
+        {
+            cout << "Invalid input! Please enter a number.\n";
+            cin.clear();
+            cin.ignore(numeric_limits<streamsize>::max(), '\n');
+            continue;
+        }
+
+        if (choice == 1)
+        {
+            registerUser(globalTrends);
+        }
+        else if (choice == 2)
+        {
+            loginUser(globalTrends);
+        }
+        else if (choice == 3)
+        {
+            cout << "Bye Bye, will miss you!";
+            break;
+        }
         else
-            { cout << "Bye Bye, will miss you!";
-              break;
-            }
+        {
+            cout << "Ohho! Invalid Choice! Try again";
+            continue;
+        }
     }
+
     return 0;
 }
