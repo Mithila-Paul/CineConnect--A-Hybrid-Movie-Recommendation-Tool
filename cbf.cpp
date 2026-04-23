@@ -1,5 +1,6 @@
 #include "cbf.h"
 #include "tf-idf.h"
+#include "csv_parser.h"
 #include <fstream>
 #include <sstream>
 #include <cmath>
@@ -8,11 +9,12 @@
 
 using namespace std;
 
-// to load the movie vectors from file
+// Load saved movie vectors from file
 vector<pair<int, Vector>> loadMovieVectors(const string &filename)
 {
     ifstream file(filename);
     vector<pair<int, Vector>> movieVectors;
+
     if (!file.is_open())
     {
         cout << "Error opening movie vectors file\n";
@@ -28,15 +30,16 @@ vector<pair<int, Vector>> loadMovieVectors(const string &filename)
 
         Vector vec;
         string token;
+
         while (ss >> token)
         {
-            int pos = token.find(':');
+            int pos = (int)token.find(':');
             string word = token.substr(0, pos);
             double value = stod(token.substr(pos + 1));
             vec[word] = value;
         }
 
-        movieVectors.push_back({movieID, vec});
+        movieVectors.push_back(make_pair(movieID, vec));
     }
 
     file.close();
@@ -49,260 +52,446 @@ Vector buildQueryVector(
     int totalDocs)
 {
     vector<string> tokens = tokenize(query);
-
-    auto tf = computeTF(tokens);
-
+    unordered_map<string, double> tf = computeTF(tokens);
     return computeTFIDF(tf, df, totalDocs);
 }
 
-// to add cold start recommendation, currently minimal
+// Cold-start recommendation using only query similarity
 vector<int> coldStartRecommend(
     const vector<pair<int, Vector>> &movieVectors,
-    const Vector &queryVector, // <--- Add this argument
+    const Vector &queryVector,
     int topN)
 {
     vector<pair<double, int>> scores;
 
-    for (auto &mv : movieVectors)
+    for (int i = 0; i < (int)movieVectors.size(); i++)
     {
-        // Calculate similarity purely based on the text search
-        double score = cosineSimilarity(queryVector, mv.second);
-        scores.push_back({score, mv.first});
+        double score = cosineSimilarity(queryVector, movieVectors[i].second);
+        scores.push_back(make_pair(score, movieVectors[i].first));
     }
 
     sort(scores.rbegin(), scores.rend());
 
     vector<int> recs;
-    for (int i = 0; i < topN && i < scores.size(); i++)
+    for (int i = 0; i < topN && i < (int)scores.size(); i++)
+    {
         recs.push_back(scores[i].second);
+    }
 
     return recs;
 }
-// detect cold start
+
 bool isColdStart(const Vector &userVector)
 {
     return userVector.empty();
 }
 
-// to get already rated movie IDs so that I can exclude them from recommendations
-unordered_set<int>
-getRatedMovieIds(const string &ratingsFile)
+// Get all movie ids already rated by this user
+unordered_set<int> getRatedMovieIds(const string &ratingsFile, int userId)
 {
     unordered_set<int> rated;
+
     ifstream in(ratingsFile);
-
-    int movieId;
-    double rating;
-    string title, bar;
-
-    while (in >> movieId >> bar)
+    if (in.is_open())
     {
-        getline(in, title, '|'); // ignore title
-        in >> rating;
-        rated.insert(movieId);
+        string line;
+
+        while (getline(in, line))
+        {
+            if (!line.empty() && line[line.size() - 1] == '\r')
+            {
+                line.erase(line.size() - 1);
+            }
+
+            stringstream ss(line);
+            string midStr, title, rStr;
+
+            getline(ss, midStr, '|');
+            getline(ss, title, '|');
+            getline(ss, rStr, '|');
+
+            midStr.erase(remove_if(midStr.begin(), midStr.end(), ::isspace), midStr.end());
+
+            if (!midStr.empty())
+            {
+                try
+                {
+                    rated.insert(stoi(midStr));
+                }
+                catch (...)
+                {
+                }
+            }
+        }
+
+        in.close();
     }
-    in.close();
+
+    // Also check global ratings file for original dataset users
+    if (userId >= 1 && userId <= 610)
+    {
+        ifstream global("ratings_processed.csv");
+
+        if (global.is_open())
+        {
+            string line;
+            getline(global, line); // skip header
+
+            while (getline(global, line))
+            {
+                if (!line.empty() && line[line.size() - 1] == '\r')
+                {
+                    line.erase(line.size() - 1);
+                }
+
+                stringstream ss(line);
+                string movieIdStr, userIdStr;
+
+                getline(ss, movieIdStr, ',');
+                getline(ss, userIdStr, ',');
+
+                if (!userIdStr.empty() && !movieIdStr.empty())
+                {
+                    try
+                    {
+                        if (stoi(userIdStr) == userId)
+                        {
+                            rated.insert(stoi(movieIdStr));
+                        }
+                    }
+                    catch (...)
+                    {
+                    }
+                }
+            }
+
+            global.close();
+        }
+    }
 
     return rated;
 }
 
-// building user preference vector
+// Build user profile vector from rated movies
 Vector buildUserVector(
     const string &ratingsFile,
-    const vector<pair<int, Vector>> &movieVectors)
+    const vector<pair<int, Vector>> &movieVectors,
+    int userId)
 {
-    ifstream file(ratingsFile);
     Vector userVector;
 
-    if (!file.is_open())
+    unordered_map<int, const Vector *> vectorMap;
+    for (int i = 0; i < (int)movieVectors.size(); i++)
     {
-        cout << "Error opening user ratings file\n";
-        return userVector;
+        vectorMap[movieVectors[i].first] = &movieVectors[i].second;
     }
 
-    int movieID;
-    double rating;
-    string title, bar;
-
-    while (file >> movieID >> bar)
+    if (userId >= 1 && userId <= 610)
     {
-        getline(file, title, '|'); // skip title
-        file >> rating;
+        ifstream file("ratings_processed.csv");
 
-        for (auto &mv : movieVectors)
+        if (!file.is_open())
         {
-            if (mv.first == movieID)
+            cout << "Error opening global ratings file\n";
+            return userVector;
+        }
+
+        string line;
+        getline(file, line); // skip header
+
+        while (getline(file, line))
+        {
+            stringstream ss(line);
+            string movieIdStr, userIdStr, ratingStr;
+
+            getline(ss, movieIdStr, ',');
+            getline(ss, userIdStr, ',');
+            getline(ss, ratingStr, ',');
+
+            if (!userIdStr.empty() && stoi(userIdStr) == userId)
             {
-                for (auto &it : mv.second)
+                try
                 {
-                    userVector[it.first] += rating * it.second;
+                    int movieID = stoi(movieIdStr);
+                    double rating = stod(ratingStr);
+
+                    unordered_map<int, const Vector *>::iterator it = vectorMap.find(movieID);
+                    if (it != vectorMap.end())
+                    {
+                        unordered_map<string, double>::const_iterator kv;
+                        for (kv = it->second->begin(); kv != it->second->end(); ++kv)
+                        {
+                            userVector[kv->first] += rating * kv->second;
+                        }
+                    }
                 }
-                break;
+                catch (...)
+                {
+                }
             }
         }
+
+        file.close();
+    }
+    else
+    {
+        ifstream file(ratingsFile);
+
+        if (!file.is_open())
+        {
+            cout << "Error opening user ratings file\n";
+            return userVector;
+        }
+
+        string line;
+        while (getline(file, line))
+        {
+            if (!line.empty() && line[line.size() - 1] == '\r')
+            {
+                line.erase(line.size() - 1);
+            }
+
+            stringstream ss(line);
+            string midStr, title, rStr;
+
+            getline(ss, midStr, '|');
+            getline(ss, title, '|');
+            getline(ss, rStr, '|');
+
+            midStr.erase(remove_if(midStr.begin(), midStr.end(), ::isspace), midStr.end());
+            rStr.erase(remove_if(rStr.begin(), rStr.end(), ::isspace), rStr.end());
+
+            if (!midStr.empty() && !rStr.empty())
+            {
+                try
+                {
+                    int movieID = stoi(midStr);
+                    double rating = stod(rStr);
+
+                    unordered_map<int, const Vector *>::iterator it = vectorMap.find(movieID);
+                    if (it != vectorMap.end())
+                    {
+                        unordered_map<string, double>::const_iterator kv;
+                        for (kv = it->second->begin(); kv != it->second->end(); ++kv)
+                        {
+                            userVector[kv->first] += rating * kv->second;
+                        }
+                    }
+                }
+                catch (...)
+                {
+                }
+            }
+        }
+
+        file.close();
     }
 
-    // Normalizing user vector
+    // Normalize the user vector
     double norm = 0.0;
-    for (auto &it : userVector)
-        norm += it.second * it.second;
+
+    unordered_map<string, double>::iterator it;
+    for (it = userVector.begin(); it != userVector.end(); ++it)
+    {
+        norm += it->second * it->second;
+    }
 
     norm = sqrt(norm);
-    if (norm > 0)
+
+    if (norm > 0.0)
     {
-        for (auto &it : userVector)
-            it.second /= norm;
+        for (it = userVector.begin(); it != userVector.end(); ++it)
+        {
+            it->second /= norm;
+        }
     }
 
     return userVector;
 }
 
-// load movie titles from CSV to map them with ids
-unordered_map<int, string>
-loadMovieTitles(const string &csvFile)
+// Load movie titles from csv
+unordered_map<int, string> loadMovieTitles(const string &csvFile)
 {
     unordered_map<int, string> titles;
+
     ifstream file(csvFile);
+    if (!file.is_open())
+    {
+        return titles;
+    }
 
     string line;
-    getline(file, line); // header
+    getline(file, line); // skip header
 
     while (getline(file, line))
     {
-        stringstream ss(line);
-        string idStr, title;
+        stripCR(line);
 
-        getline(ss, idStr, ',');
-        getline(ss, title, ',');
+        if (line.empty())
+        {
+            continue;
+        }
 
-        int id = stoi(idStr);
+        istringstream ss(line);
+        string idStr = parseCsvField(ss);
+        string title = parseCsvField(ss);
 
-        // remove quotes
-        if (!title.empty() && title.front() == '"')
-            title = title.substr(1, title.size() - 2);
-
-        titles[id] = title;
+        try
+        {
+            titles[stoi(idStr)] = title;
+        }
+        catch (...)
+        {
+        }
     }
+
+    file.close();
     return titles;
 }
 
-// calculating cosine similarity
+// Cosine similarity between two vectors
 double cosineSimilarity(const Vector &A, const Vector &B)
 {
-    double dot = 0.0, normA = 0.0, normB = 0.0;
+    double dot = 0.0;
+    double normA = 0.0;
+    double normB = 0.0;
 
-    for (auto &it : A)
+    unordered_map<string, double>::const_iterator it;
+    for (it = A.begin(); it != A.end(); ++it)
     {
-        normA += it.second * it.second;
-        if (B.count(it.first))
-            dot += it.second * B.at(it.first);
+        normA += it->second * it->second;
+
+        if (B.count(it->first))
+        {
+            dot += it->second * B.at(it->first);
+        }
     }
 
-    for (auto &it : B)
-        normB += it.second * it.second;
+    for (it = B.begin(); it != B.end(); ++it)
+    {
+        normB += it->second * it->second;
+    }
 
-    if (normA == 0 || normB == 0)
+    if (normA == 0.0 || normB == 0.0)
+    {
         return 0.0;
+    }
 
     return dot / (sqrt(normA) * sqrt(normB));
 }
 
-// cbf recommendation function on basis of users personal ratings, suggesting top 10 movies
-vector<int> recommendMovies(
-    const Vector &userVector,
-    const Vector &queryVector,
-    const vector<pair<int, Vector>> &movieVectors,
-    int topN,
-    const unordered_set<int> &ratedMovies,
-    const vector<string> &queryTopics)
-{
-    auto movieTopics = loadMovieTopics("movie_topics.txt");
+// CBF recommendation function
+// vector<int> recommendMovies(
+//     const Vector &userVector,
+//     const Vector &queryVector,
+//     const vector<pair<int, Vector>> &movieVectors,
+//     int topN,
+//     const unordered_set<int> &ratedMovies,
+//     const vector<string> &queryTopics)
+// {
+//     unordered_map<int, vector<string>> movieTopics = loadMovieTopics("movie_topics.txt");
 
-    // vector<string> queryTopics = processQuery(""); // placeholder
+//     vector<pair<double, int>> scores;
 
-    vector<pair<double, int>> scores;
+//     double alpha = 0.55;
+//     double beta = 0.35;
+//     double gamma = 0.10;
 
-    double alpha = 0.5; // user preference weight
-    double beta = 0.3;  // search query weight
-    double gamma = 0.2; // topic similarity weight
+//     for (int i = 0; i < (int)movieVectors.size(); i++)
+//     {
+//         int movieId = movieVectors[i].first;
 
-    for (auto &mv : movieVectors)
-    {
-        int movieId = mv.first;
+//         if (ratedMovies.count(movieId))
+//         {
+//             continue;
+//         }
 
-        if (ratedMovies.count(movieId))
-            continue;
+//         double userSim = cosineSimilarity(userVector, movieVectors[i].second);
+//         double querySim = cosineSimilarity(queryVector, movieVectors[i].second);
 
-        double userSim = cosineSimilarity(userVector, mv.second);
-        double querySim = cosineSimilarity(queryVector, mv.second);
+//         double topicSim = 0.0;
+//         if (movieTopics.count(movieId))
+//         {
+//             topicSim = topicSimilarity(queryTopics, movieTopics[movieId]);
+//         }
 
-        double topicSim = 0.0;
-        if (movieTopics.count(movieId))
-            topicSim = topicSimilarity(queryTopics, movieTopics[movieId]);
+//         double finalScore =
+//             alpha * userSim +
+//             beta * querySim +
+//             gamma * topicSim;
 
-        double finalScore =
-            alpha * userSim +
-            beta * querySim +
-            gamma * topicSim;
+//         scores.push_back(make_pair(finalScore, movieId));
+//     }
 
-        scores.push_back({finalScore, movieId});
-    }
+//     sort(scores.rbegin(), scores.rend());
 
-    sort(scores.rbegin(), scores.rend());
+//     vector<int> recs;
+//     for (int i = 0; i < topN && i < (int)scores.size(); i++)
+//     {
+//         recs.push_back(scores[i].second);
+//     }
 
-    vector<int> recs;
+//     return recs;
+// }
 
-    for (int i = 0; i < topN && i < scores.size(); i++)
-        recs.push_back(scores[i].second);
-
-    return recs;
-}
-
-unordered_map<int, vector<string>>
-loadMovieTopics(const string &file)
+unordered_map<int, vector<string>> loadMovieTopics(const string &file)
 {
     unordered_map<int, vector<string>> topics;
+
     ifstream in(file);
 
     string line;
     while (getline(in, line))
     {
         stringstream ss(line);
+
         int id;
         ss >> id;
 
         string word;
         while (ss >> word)
+        {
             topics[id].push_back(word);
+        }
     }
 
+    in.close();
     return topics;
 }
+
 vector<string> processQuery(string query)
 {
     return tokenize(query);
 }
 
-// Jaccard Similarity for topics (intersection over union)
+// Jaccard similarity for topic words
 double topicSimilarity(const vector<string> &A, const vector<string> &B)
 {
     if (A.empty() || B.empty())
+    {
         return 0.0;
+    }
 
     unordered_set<string> setA(A.begin(), A.end());
     unordered_set<string> setB(B.begin(), B.end());
 
     int intersection = 0;
-    for (const string &s : setB)
+
+    unordered_set<string>::const_iterator it;
+    for (it = setB.begin(); it != setB.end(); ++it)
     {
-        if (setA.count(s))
+        if (setA.count(*it))
+        {
             intersection++;
+        }
     }
 
-    int unionSize = setA.size() + setB.size() - intersection;
+    int unionSize = (int)setA.size() + (int)setB.size() - intersection;
 
     if (unionSize == 0)
+    {
         return 0.0;
+    }
 
     return (double)intersection / unionSize;
 }
