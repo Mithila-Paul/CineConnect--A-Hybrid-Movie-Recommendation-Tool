@@ -5,33 +5,6 @@
 
 using namespace std;
 
-// =============================================================================
-// computeGP
-//
-// Full implementation notes
-// ──────────────────────────
-//
-// Node encoding
-//   Users  are stored with key  +userId   (positive int)
-//   Movies are stored with key  -movieId  (negative int)
-// This lets a single unordered_map<int,double> hold both kinds of node
-// without any struct overhead or separate maps.
-//
-// Graph construction  (O(R) where R = number of ratings)
-//   user→movie edges:  w(u→m) = rating(u,m) / 5.0
-//   movie→user edges:  w(m→u) = 1 / degree(m)
-//
-// Seed vector
-//   seed(-movieId) = normalised_rating / sum_of_normalised_ratings
-//
-// Propagation
-//   score_new(v) = α · seed(v)  +  (1-α) · Σ_u [ score(u) · w(u→v) ]
-//
-// Output
-//   Only movie nodes (negative keys) that are NOT in ratedMovies are
-//   returned, normalised to [0,1].
-// =============================================================================
-
 unordered_map<int, double> computeGP(
     const GPRatingsMap &ratingsMap,
     int userId,
@@ -39,106 +12,153 @@ unordered_map<int, double> computeGP(
     double alpha,
     int iterations)
 {
-    // ── 1. Build adjacency list ───────────────────────────────────────────────
-    unordered_map<int, vector<pair<int, double> > > edges;
-    unordered_map<int, int> movieDegree; // key = -movieId
+    unordered_map<int, vector<pair<int, double>>> edges;
+    unordered_map<int, int> movieDegree;
 
-    for (GPRatingsMap::const_iterator it = ratingsMap.begin(); it != ratingsMap.end(); ++it)
+    GPRatingsMap::const_iterator it;
+    for (it = ratingsMap.begin(); it != ratingsMap.end(); ++it)
     {
         int uid = it->first;
         const unordered_map<int, double> &movieRatings = it->second;
-        int uNode = uid; // positive
+        int uNode = uid;
 
-        for (unordered_map<int, double>::const_iterator jt = movieRatings.begin(); jt != movieRatings.end(); ++jt)
+        unordered_map<int, double>::const_iterator jt;
+        for (jt = movieRatings.begin(); jt != movieRatings.end(); ++jt)
         {
             int mid = jt->first;
             double rating = jt->second;
-            int mNode = -mid; // negative
+            int mNode = -mid;
 
-            // user -> movie edge
             double uToM = rating / 5.0;
             edges[uNode].push_back(make_pair(mNode, uToM));
 
-            // movie -> user placeholder
             edges[mNode].push_back(make_pair(uNode, 1.0));
             movieDegree[mNode]++;
         }
     }
 
-    // Normalize movie -> user edge weights by movie degree
-    for (unordered_map<int, vector<pair<int, double> > >::iterator it = edges.begin(); it != edges.end(); ++it)
+    unordered_map<int, vector<pair<int, double>>>::iterator eit;
+    for (eit = edges.begin(); eit != edges.end(); ++eit)
     {
-        int src = it->first;
-        vector<pair<int, double> > &adjList = it->second;
+        int src = eit->first;
+        vector<pair<int, double>> &adjList = eit->second;
 
-        if (src >= 0) continue; // skip user nodes
+        if (src >= 0)
+        {
+            continue;
+        }
 
         int degree = 1;
         unordered_map<int, int>::iterator degIt = movieDegree.find(src);
-        if (degIt != movieDegree.end())
-            degree = degIt->second;
 
-        for (size_t i = 0; i < adjList.size(); i++)
+        if (degIt != movieDegree.end())
+        {
+            degree = degIt->second;
+        }
+
+        for (int i = 0; i < (int)adjList.size(); i++)
+        {
             adjList[i].second = 1.0 / degree;
+        }
     }
 
-    // ── 2. Build seed vector ──────────────────────────────────────────────────
+    for (eit = edges.begin(); eit != edges.end(); ++eit)
+    {
+        int src = eit->first;
+        vector<pair<int, double>> &adjList = eit->second;
+
+        if (src < 0)
+        {
+            continue;
+        }
+
+        double outSum = 0.0;
+
+        for (int i = 0; i < (int)adjList.size(); i++)
+        {
+            outSum += adjList[i].second;
+        }
+
+        if (outSum > 0.0)
+        {
+            for (int i = 0; i < (int)adjList.size(); i++)
+            {
+                adjList[i].second /= outSum;
+            }
+        }
+    }
+
     unordered_map<int, double> seed;
 
     GPRatingsMap::const_iterator uitr = ratingsMap.find(userId);
     if (uitr == ratingsMap.end())
-        return unordered_map<int, double>(); // no ratings for this user
+    {
+        return unordered_map<int, double>();
+    }
 
     double seedSum = 0.0;
     const unordered_map<int, double> &userRatings = uitr->second;
 
-    for (unordered_map<int, double>::const_iterator it = userRatings.begin(); it != userRatings.end(); ++it)
+    unordered_map<int, double>::const_iterator sit;
+    for (sit = userRatings.begin(); sit != userRatings.end(); ++sit)
     {
-        int mid = it->first;
-        double rating = it->second;
+        int mid = sit->first;
+        double rating = sit->second;
 
-        if (rating <= 0.0) continue;
+        if (rating <= 0.0)
+        {
+            continue;
+        }
 
         seed[-mid] = rating / 5.0;
         seedSum += rating / 5.0;
     }
 
     if (seedSum == 0.0)
+    {
         return unordered_map<int, double>();
+    }
 
-    for (unordered_map<int, double>::iterator it = seed.begin(); it != seed.end(); ++it)
-        it->second /= seedSum;
+    unordered_map<int, double>::iterator seedIt;
+    for (seedIt = seed.begin(); seedIt != seed.end(); ++seedIt)
+    {
+        seedIt->second /= seedSum;
+    }
 
-    // ── 3. Initialise score vector = seed ─────────────────────────────────────
     unordered_map<int, double> score = seed;
 
-    // ── 4. Propagation iterations ─────────────────────────────────────────────
     for (int iter = 0; iter < iterations; iter++)
     {
         unordered_map<int, double> newScore;
 
-        // Teleport term
-        for (unordered_map<int, double>::const_iterator it = seed.begin(); it != seed.end(); ++it)
+        unordered_map<int, double>::const_iterator seedConstIt;
+        for (seedConstIt = seed.begin(); seedConstIt != seed.end(); ++seedConstIt)
         {
-            int node = it->first;
-            double s = it->second;
+            int node = seedConstIt->first;
+            double s = seedConstIt->second;
             newScore[node] += alpha * s;
         }
 
-        // Propagation term
-        for (unordered_map<int, vector<pair<int, double> > >::const_iterator it = edges.begin(); it != edges.end(); ++it)
+        unordered_map<int, vector<pair<int, double>>>::const_iterator edgeIt;
+        for (edgeIt = edges.begin(); edgeIt != edges.end(); ++edgeIt)
         {
-            int src = it->first;
-            const vector<pair<int, double> > &adjList = it->second;
+            int src = edgeIt->first;
+            const vector<pair<int, double>> &adjList = edgeIt->second;
 
             double srcScore = 0.0;
             unordered_map<int, double>::const_iterator scIt = score.find(src);
+
             if (scIt != score.end())
+            {
                 srcScore = scIt->second;
+            }
 
-            if (srcScore == 0.0) continue;
+            if (srcScore == 0.0)
+            {
+                continue;
+            }
 
-            for (size_t i = 0; i < adjList.size(); i++)
+            for (int i = 0; i < (int)adjList.size(); i++)
             {
                 int dst = adjList[i].first;
                 double w = adjList[i].second;
@@ -149,28 +169,42 @@ unordered_map<int, double> computeGP(
         score = newScore;
     }
 
-    // ── 5. Extract and normalise movie scores ─────────────────────────────────
     unordered_map<int, double> gpScores;
     double maxScore = 0.0;
 
-    for (unordered_map<int, double>::const_iterator it = score.begin(); it != score.end(); ++it)
+    unordered_map<int, double>::const_iterator finalIt;
+    for (finalIt = score.begin(); finalIt != score.end(); ++finalIt)
     {
-        int node = it->first;
-        double s = it->second;
+        int node = finalIt->first;
+        double s = finalIt->second;
 
-        if (node >= 0) continue; // skip user nodes
+        if (node >= 0)
+        {
+            continue;
+        }
 
         int movieId = -node;
-        if (ratedMovies.find(movieId) != ratedMovies.end()) continue;
+
+        if (ratedMovies.find(movieId) != ratedMovies.end())
+        {
+            continue;
+        }
 
         gpScores[movieId] = s;
-        if (s > maxScore) maxScore = s;
+
+        if (s > maxScore)
+        {
+            maxScore = s;
+        }
     }
 
     if (maxScore > 0.0)
     {
-        for (unordered_map<int, double>::iterator it = gpScores.begin(); it != gpScores.end(); ++it)
-            it->second /= maxScore;
+        unordered_map<int, double>::iterator normIt;
+        for (normIt = gpScores.begin(); normIt != gpScores.end(); ++normIt)
+        {
+            normIt->second /= maxScore;
+        }
     }
 
     return gpScores;
