@@ -32,7 +32,7 @@ New users
 Personalized recommendations
 
 
-2.  Collaborative Filtering (CF)
+2. Collaborative Filtering (CF)
 Finds users with similar tastes
 Uses Pearson similarity
 Predicts ratings based on neighbors
@@ -41,7 +41,7 @@ Predicts ratings based on neighbors
 Community-driven recommendations
 
 
-3.  Matrix Factorization (MF)
+3. Matrix Factorization (MF)
 Breaks data into hidden patterns (latent features)
 Trained using Stochastic Gradient Descent (SGD)
 
@@ -105,6 +105,12 @@ trends.cpp     → Popularity & statistics
 User.cpp       → Main system + integration
 system_init    → Initialization logic
 
+**Pre-process Branch Notice
+**Important: The Pre-process branch is dedicated solely to dataset preprocessing and preparation tasks.
+It contains scripts and utilities used for cleaning, transforming, and structuring the raw data before it is used by the main system.
+These files are **not part of the core CineConnect recommendation pipeline ** and are kept in a separate branch to maintain a clean and modular project structure.
+The main branch contains only the production-level implementation of the recommendation system
+
 User Flow:
 Register → get user ID
 Cold-start onboarding (choose genres + rate movies)
@@ -112,6 +118,7 @@ Login
 Rate movies
 Get recommendations
 Search based on mood
+Get trending movies, genres, actors.
 
 Key Features:
 Hybrid recommendation system
@@ -121,7 +128,7 @@ Multi-mode search
 Real-time scoring
 Scalable architecture
 Optimized performance (caching, normalization)
-Trending/statistical usefulness in fallback or ranking suppor
+Trending/statistical usefulness in fallback or ranking support
 
 
 CineConnect is not just a simple recommender—it’s a complete hybrid system that mimics how real-world platforms (like Netflix) combine multiple techniques to deliver better recommendations.
